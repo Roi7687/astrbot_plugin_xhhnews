@@ -85,10 +85,14 @@ def create_hkey(path: str, t: int, nonce: str) -> str:
     return s + a
 
 
-def generate_sign_params(path: str) -> dict:
+def generate_sign_params(path: str, heybox_id: str = "-1") -> dict:
     """生成完整的 API 签名参数。
 
-    Returns: {"hkey": ..., "_time": ..., "nonce": ..., 以及其他公共参数}
+    Args:
+        path: API 路径
+        heybox_id: 用户 heybox_id，登录后可获取
+
+    Returns: 包含 hkey/_time/nonce 及其他公共参数的字典
     """
     t = int(time.time())
     nonce = _md5(str(t) + str(random.random())).upper()
@@ -96,12 +100,14 @@ def generate_sign_params(path: str) -> dict:
     return {
         "os_type": "web",
         "app": "heybox",
-        "client_type": "mobile",
+        "client_type": "web",
         "version": "999.0.4",
+        "web_version": "2.5",
         "x_client_type": "web",
         "x_os_type": "Windows",
-        "x_app": "heybox",
-        "heybox_id": "-1",
+        "x_app": "heybox_website",
+        "heybox_id": heybox_id,
+        "device_info": "Chrome",
         "hkey": hkey,
         "_time": str(t),
         "nonce": nonce,
