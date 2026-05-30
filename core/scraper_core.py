@@ -240,38 +240,69 @@ class XhhScraperCore:
     # ── 订阅管理 ──
 
     @staticmethod
-    def add_subscription(group_id: str, topic_id: str) -> tuple[bool, str]:
+    def add_subscription(group_id: str, topic_id: str, topic_name: str = "") -> tuple[bool, str]:
         """添加订阅，返回 (是否成功, 提示信息)。"""
         subs = load_subscriptions()
-        group_subs = subs.get(group_id, [])
+        group_subs = subs.get(group_id, {})
 
         if topic_id in group_subs:
             return False, f"社区 {topic_id} 已经订阅过了。"
 
-        group_subs.append(topic_id)
+        group_subs[topic_id] = topic_name
         subs[group_id] = group_subs
         save_subscriptions(subs)
-        return True, f"✅ 已订阅社区 {topic_id}。"
+        return True, f"✅ 已订阅社区 {topic_name or topic_id}。"
 
     @staticmethod
     def remove_subscription(group_id: str, topic_id: str) -> tuple[bool, str]:
         """取消订阅，返回 (是否成功, 提示信息)。"""
         subs = load_subscriptions()
-        group_subs = subs.get(group_id, [])
+        group_subs = subs.get(group_id, {})
 
         if topic_id not in group_subs:
             return False, f"社区 {topic_id} 未在订阅列表中。"
 
-        group_subs.remove(topic_id)
+        name = group_subs.pop(topic_id)
         subs[group_id] = group_subs
         save_subscriptions(subs)
-        return True, f"✅ 已取消订阅社区 {topic_id}。"
+        return True, f"✅ 已取消订阅社区 {name or topic_id}。"
 
     @staticmethod
-    def get_subscriptions(group_id: str) -> list[str]:
-        """获取指定群的订阅列表。"""
+    def get_subscriptions(group_id: str) -> dict:
+        """获取指定群的订阅列表，返回 {topic_id: topic_name}。"""
         subs = load_subscriptions()
-        return subs.get(group_id, [])
+        return subs.get(group_id, {})
+
+    async def fetch_topic_name(self, topic_id: str) -> str:
+        """从社区页面抓取社区名称。"""
+        url = TOPIC_URL_TEMPLATE.format(topic_id=topic_id)
+        logger.info(f"[ScraperCore] 正在获取社区 {topic_id} 的名称...")
+
+        context = await launch_context_async(
+            headless=True,
+            humanize=True,
+            storage_state=AUTH_STATE_FILE if os.path.exists(AUTH_STATE_FILE) else None,
+        )
+
+        try:
+            page = await context.new_page()
+            page.set_default_timeout(30000)
+            page.set_default_navigation_timeout(30000)
+
+            await page.goto(url)
+            await page.wait_for_load_state("networkidle", timeout=20000)
+
+            title = await page.title()
+            # 标题格式："社区名 - 小黑盒"
+            name = title.replace(" - 小黑盒", "").replace(" - 小⿊盒", "").strip()
+            logger.info(f"[ScraperCore] 社区 {topic_id} 名称: {name}")
+            return name
+
+        except Exception as e:
+            logger.warning(f"[ScraperCore] 获取社区名称失败: {e}")
+            return ""
+        finally:
+            await context.close()
 
     async def fetch_topic_posts(self, topic_id: str, scroll_times: int = 2) -> list[dict]:
         """从指定社区抓取帖子列表。"""
@@ -312,12 +343,12 @@ class XhhScraperCore:
 
     async def fetch_subscribed_posts(self, group_id: str, scroll_times: int = 2) -> list[dict]:
         """从所有订阅社区抓取帖子，合并返回。"""
-        topic_ids = self.get_subscriptions(group_id)
-        if not topic_ids:
+        topic_subs = self.get_subscriptions(group_id)
+        if not topic_subs:
             return []
 
         all_posts = []
-        for topic_id in topic_ids:
+        for topic_id in topic_subs:
             try:
                 posts = await self.fetch_topic_posts(topic_id, scroll_times)
                 all_posts.extend(posts)

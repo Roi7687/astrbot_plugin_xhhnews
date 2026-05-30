@@ -156,12 +156,13 @@ class XhhNewsPlugin(Star):
             "📋 命令列表：\n"
             "• /hb — 抓取主页热帖 TOP 5\n"
             "• /hbpush — 从订阅社区抓取热帖 TOP 8\n"
-            "• /hbsub <ID> — 订阅社区\n"
+            "• /hbsub <ID> — 订阅社区（自动获取名称）\n"
             "• /hbunsub <ID> — 取消订阅\n"
             "• /hbsublist — 查看订阅\n"
             "• /hblogin — 扫码登录\n"
             "• /hbhelp — 帮助\n\n"
-            "📌 社区ID：链接中 /link/ 后的数字"
+            "📌 社区ID：社区链接中 /link/ 后的数字\n"
+            "例：xiaoheihe.cn/app/topic/link/18745 → 18745"
         )
         yield event.plain_result(help_text)
 
@@ -175,7 +176,15 @@ class XhhNewsPlugin(Star):
 
         topic_id = topic_id.strip()
         group_id = str(event.get_group_id() or event.get_sender_id())
-        success, msg = self.scraper.add_subscription(group_id, topic_id)
+
+        # 自动获取社区名称
+        topic_name = ""
+        try:
+            topic_name = await self.scraper.fetch_topic_name(topic_id)
+        except Exception:
+            pass
+
+        _, msg = self.scraper.add_subscription(group_id, topic_id, topic_name)
         yield event.plain_result(msg)
 
     @filter.command("hbunsub")
@@ -203,10 +212,11 @@ class XhhNewsPlugin(Star):
             return
 
         lines = ["📋 当前订阅的社区：\n"]
-        for i, topic_id in enumerate(subs, 1):
-            lines.append(f"{i}. 社区ID: {topic_id}")
-            lines.append(f"   🔗 https://www.xiaoheihe.cn/app/topic/link/{topic_id}\n")
-        lines.append(f"\n共 {len(subs)} 个订阅")
+        for i, (tid, tname) in enumerate(subs.items(), 1):
+            name_display = f" {tname}" if tname else ""
+            lines.append(f"{i}.{name_display} (ID: {tid})")
+            lines.append(f"   🔗 https://www.xiaoheihe.cn/app/topic/link/{tid}\n")
+        lines.append(f"共 {len(subs)} 个订阅")
         yield event.plain_result("\n".join(lines))
 
     @filter.command("hbpush")

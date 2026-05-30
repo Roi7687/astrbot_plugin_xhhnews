@@ -16,10 +16,15 @@ class AuthError(Exception):
 
 
 def load_subscriptions() -> dict:
-    """加载订阅数据，格式：{"group_id": [topic_id1, topic_id2, ...]}"""
+    """加载订阅数据，格式：{"group_id": {"topic_id": "topic_name", ...}}"""
     if os.path.exists(SUBSCRIBE_FILE):
         with open(SUBSCRIBE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            # 兼容旧格式：将 list 转为 dict
+            for k, v in data.items():
+                if isinstance(v, list):
+                    data[k] = {tid: "" for tid in v}
+            return data
     return {}
 
 
