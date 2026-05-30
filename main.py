@@ -168,24 +168,44 @@ class XhhNewsPlugin(Star):
 
     @filter.command("hbsub")
     async def subscribe_command(self, event: AstrMessageEvent, topic_id: str = ""):
-        """订阅指定社区。"""
+        """订阅指定社区。支持输入社区ID或社区名称搜索。"""
 
         if not topic_id.strip():
-            yield event.plain_result("❌ 请提供社区ID。\n用法：/hbsub 18745\n\n社区ID是链接中 /link/ 后的数字")
+            yield event.plain_result(
+                "❌ 请提供社区ID或名称。\n"
+                "用法：/hbsub 18745 或 /hbsub 数码硬件"
+            )
             return
 
-        topic_id = topic_id.strip()
+        query = topic_id.strip()
         group_id = str(event.get_group_id() or event.get_sender_id())
 
-        # 自动获取社区名称
-        topic_name = ""
-        try:
-            topic_name = await self.scraper.fetch_topic_name(topic_id)
-        except Exception:
-            pass
+        # 判断是纯数字 ID 还是名称搜索
+        if query.isdigit():
+            # 直接用 ID 订阅
+            topic_name = ""
+            try:
+                topic_name = await self.scraper.fetch_topic_name(query)
+            except Exception:
+                pass
+            _, msg = self.scraper.add_subscription(group_id, query, topic_name)
+            yield event.plain_result(msg)
+        else:
+            # 按名称搜索社区
+            yield event.plain_result(f"🔍 正在搜索社区「{query}」...")
+            try:
+                result = await self.scraper.search_topic(query)
+                if result is None:
+                    yield event.plain_result(f"❌ 未找到社区「{query}」，请换个关键词试试。")
+                    return
 
-        _, msg = self.scraper.add_subscription(group_id, topic_id, topic_name)
-        yield event.plain_result(msg)
+                topic_id_found, topic_name = result
+                _, msg = self.scraper.add_subscription(group_id, topic_id_found, topic_name)
+                yield event.plain_result(msg)
+            except AuthError:
+                yield event.plain_result("⚠️ 未登录，请先发送 /hblogin 扫码登录。")
+            except Exception as e:
+                yield event.plain_result(f"❌ 搜索失败: {e}")
 
     @filter.command("hbunsub")
     async def unsubscribe_command(self, event: AstrMessageEvent, topic_id: str = ""):

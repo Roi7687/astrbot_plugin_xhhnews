@@ -293,7 +293,6 @@ class XhhScraperCore:
             await page.wait_for_load_state("networkidle", timeout=20000)
 
             title = await page.title()
-            # 标题格式："社区名 - 小黑盒"
             name = title.replace(" - 小黑盒", "").replace(" - 小⿊盒", "").strip()
             logger.info(f"[ScraperCore] 社区 {topic_id} 名称: {name}")
             return name
@@ -301,6 +300,67 @@ class XhhScraperCore:
         except Exception as e:
             logger.warning(f"[ScraperCore] 获取社区名称失败: {e}")
             return ""
+        finally:
+            await context.close()
+
+    async def search_topic(self, keyword: str) -> tuple[str, str] | None:
+        """通过搜索框搜索社区，返回 (topic_id, topic_name) 或 None。"""
+        if not os.path.exists(AUTH_STATE_FILE):
+            raise AuthError("未找到登录凭证，请先执行登录。")
+
+        logger.info(f"[ScraperCore] 正在搜索社区: {keyword}")
+
+        context = await launch_context_async(
+            headless=True,
+            humanize=True,
+            storage_state=AUTH_STATE_FILE,
+        )
+
+        try:
+            page = await context.new_page()
+            page.set_default_timeout(30000)
+            page.set_default_navigation_timeout(30000)
+
+            await page.goto(COMMUNITY_URL, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(3000)
+
+            # 1. 输入关键词并搜索
+            search_input = page.locator(".search__input-item")
+            await search_input.wait_for(state="visible", timeout=10000)
+            await search_input.click()
+            await search_input.fill(keyword)
+            await search_input.press("Enter")
+            await page.wait_for_timeout(5000)
+
+            # 2. 点击第一个社区结果
+            topic_el = page.locator(".search-result__topic").first
+            if not await topic_el.count():
+                logger.info(f"[ScraperCore] 搜索 '{keyword}' 未找到社区。")
+                return None
+
+            await topic_el.click()
+            await page.wait_for_timeout(3000)
+
+            # 3. 从跳转后的 URL 提取 topic ID
+            import re
+            current_url = page.url
+            match = re.search(r"/topic/link/(\d+)", current_url)
+            if not match:
+                logger.warning(f"[ScraperCore] 无法从 URL 提取社区 ID: {current_url}")
+                return None
+
+            topic_id = match.group(1)
+
+            # 4. 从页面标题获取社区名
+            title = await page.title()
+            topic_name = title.replace(" - 小黑盒", "").replace(" - 小⿊盒", "").strip()
+
+            logger.info(f"[ScraperCore] 搜索 '{keyword}' → {topic_name} (ID: {topic_id})")
+            return topic_id, topic_name
+
+        except Exception as e:
+            logger.warning(f"[ScraperCore] 搜索社区失败: {e}")
+            return None
         finally:
             await context.close()
 
