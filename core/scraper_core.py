@@ -48,7 +48,6 @@ class XhhScraperCore:
         if not os.path.exists(AUTH_STATE_FILE):
             raise AuthError("未找到登录凭证，请先执行登录。")
 
-        logger.info("🚀 [ScraperCore] 正在启动浏览器抓取小黑盒帖子...")
         context = await launch_context_async(
             headless=True,
             humanize=True,
@@ -70,10 +69,8 @@ class XhhScraperCore:
             for i in range(scroll_times):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await page.wait_for_timeout(1500)
-                logger.info(f"[ScraperCore] 滚动 {i + 1}/{scroll_times} ...")
 
             posts = await page.evaluate(EXTRACT_POSTS_JS)
-            logger.info(f"✅ [ScraperCore] 共抓取到 {len(posts)} 条帖子。")
             return posts
 
         finally:
@@ -174,7 +171,6 @@ class XhhScraperCore:
         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False, prefix="xhhnews_")
         merged.save(tmp, format="PNG")
         tmp.close()
-        logger.info(f"[ScraperCore] 封面拼接完成: {tmp.name}")
         return tmp.name
 
     @staticmethod
@@ -276,8 +272,6 @@ class XhhScraperCore:
     async def fetch_topic_name(self, topic_id: str) -> str:
         """从社区页面抓取社区名称。"""
         url = TOPIC_URL_TEMPLATE.format(topic_id=topic_id)
-        logger.info(f"[ScraperCore] 正在获取社区 {topic_id} 的名称...")
-
         context = await launch_context_async(
             headless=True,
             humanize=True,
@@ -294,11 +288,9 @@ class XhhScraperCore:
 
             title = await page.title()
             name = title.replace(" - 小黑盒", "").replace(" - 小⿊盒", "").strip()
-            logger.info(f"[ScraperCore] 社区 {topic_id} 名称: {name}")
             return name
 
-        except Exception as e:
-            logger.warning(f"[ScraperCore] 获取社区名称失败: {e}")
+        except Exception:
             return ""
         finally:
             await context.close()
@@ -307,8 +299,6 @@ class XhhScraperCore:
         """通过搜索框搜索社区，返回 (topic_id, topic_name) 或 None。"""
         if not os.path.exists(AUTH_STATE_FILE):
             raise AuthError("未找到登录凭证，请先执行登录。")
-
-        logger.info(f"[ScraperCore] 正在搜索社区: {keyword}")
 
         context = await launch_context_async(
             headless=True,
@@ -335,7 +325,6 @@ class XhhScraperCore:
             # 2. 点击第一个社区结果
             topic_el = page.locator(".search-result__topic").first
             if not await topic_el.count():
-                logger.info(f"[ScraperCore] 搜索 '{keyword}' 未找到社区。")
                 return None
 
             await topic_el.click()
@@ -355,11 +344,9 @@ class XhhScraperCore:
             title = await page.title()
             topic_name = title.replace(" - 小黑盒", "").replace(" - 小⿊盒", "").strip()
 
-            logger.info(f"[ScraperCore] 搜索 '{keyword}' → {topic_name} (ID: {topic_id})")
             return topic_id, topic_name
 
-        except Exception as e:
-            logger.warning(f"[ScraperCore] 搜索社区失败: {e}")
+        except Exception:
             return None
         finally:
             await context.close()
@@ -371,8 +358,6 @@ class XhhScraperCore:
             raise AuthError("未找到登录凭证，请先执行登录。")
 
         url = TOPIC_URL_TEMPLATE.format(topic_id=topic_id)
-        logger.info(f"🚀 [ScraperCore] 正在抓取社区 {topic_id} 的帖子...")
-
         context = await launch_context_async(
             headless=True,
             humanize=True,
@@ -392,10 +377,8 @@ class XhhScraperCore:
             for i in range(scroll_times):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await page.wait_for_timeout(1500)
-                logger.info(f"[ScraperCore] 社区 {topic_id} 滚动 {i + 1}/{scroll_times} ...")
 
             posts = await page.evaluate(EXTRACT_POSTS_JS)
-            logger.info(f"✅ [ScraperCore] 社区 {topic_id} 共抓取到 {len(posts)} 条帖子。")
             return posts
 
         finally:
@@ -416,5 +399,4 @@ class XhhScraperCore:
                 logger.warning(f"[ScraperCore] 抓取社区 {topic_id} 失败: {e}")
                 continue
 
-        logger.info(f"[ScraperCore] 订阅源共抓取到 {len(all_posts)} 条帖子。")
         return all_posts

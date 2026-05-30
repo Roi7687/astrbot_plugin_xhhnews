@@ -192,7 +192,6 @@ class XhhNewsPlugin(Star):
             yield event.plain_result(msg)
         else:
             # 按名称搜索社区
-            yield event.plain_result(f"🔍 正在搜索社区「{query}」...")
             try:
                 result = await self.scraper.search_topic(query)
                 if result is None:
@@ -250,7 +249,6 @@ class XhhNewsPlugin(Star):
             return
 
         try:
-            yield event.plain_result(f"⏳ 正在从 {len(subs)} 个订阅社区抓取帖子...")
             posts = await self.scraper.fetch_subscribed_posts(group_id)
 
             if not posts:
