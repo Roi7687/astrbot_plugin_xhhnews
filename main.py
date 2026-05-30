@@ -1,24 +1,266 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+import asyncio
+import logging
+import os
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
+import astrbot.api.message_components as Comp
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
+from astrbot.core.star.filter.command import GreedyStr
+
+from .core.config import QR_FILE, AuthError
+from .core.scraper_core import XhhScraperCore
+from .core.login_core import CloakAuthenticator, LoginTaskState
+
+logger = logging.getLogger("astrbot")
+
+
+@register("xhhnews", "You", "小黑盒社区热帖抓取与推送插件", "1.0.0")
+class XhhNewsPlugin(Star):
+
     def __init__(self, context: Context):
         super().__init__(context)
+        self.scraper = XhhScraperCore()
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+    async def _try_send_with_keyboard(
+        self, event: AstrMessageEvent, text: str, keyboard: dict
+    ) -> bool:
+        """尝试在 QQ 官方平台发送带键盘按钮的 Markdown 消息，成功返回 True。"""
+        try:
+            bot = getattr(event, "bot", None)
+            raw = getattr(event.message_obj, "raw_message", None)
+            if not bot or not raw:
+                return False
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+            type_name = type(raw).__name__
+            msg_id = event.message_obj.message_id
+
+            if type_name == "GroupMessage":
+                await bot.api.post_group_message(
+                    group_openid=raw.group_openid,
+                    msg_type=2,                      # Markdown 消息
+                    markdown={"content": text},
+                    keyboard=keyboard,
+                    msg_id=msg_id,
+                    msg_seq=1,
+                )
+                return True
+            elif type_name == "C2CMessage":
+                await bot.api.post_c2c_message(
+                    openid=raw.author.user_openid,
+                    msg_type=2,
+                    markdown={"content": text},
+                    keyboard=keyboard,
+                    msg_id=msg_id,
+                    msg_seq=1,
+                )
+                return True
+        except Exception as e:
+            logger.warning(f"[XhhNews] 键盘消息发送失败，回退普通消息: {e}")
+        return False
+
+    @filter.command("hb", alias={"heybox"})
+    async def fetch_command(self, event: AstrMessageEvent, query: GreedyStr = ""):
+        """抓取主页热帖 TOP 5。"""
+        try:
+            posts = await self.scraper.fetch_posts(scroll_times=6)
+
+            # 1. 下载封面并拼接为一张图，发送图片
+            merged_path = await self.scraper.merge_covers(posts, top_n=5)
+            if merged_path:
+                try:
+                    yield event.image_result(merged_path)
+                finally:
+                    if os.path.exists(merged_path):
+                        os.remove(merged_path)
+
+            # 2. 构建 Markdown 文本
+            md_text = self.scraper.format_top_posts_markdown(posts, top_n=5)
+
+            # 3. 构建键盘按钮
+            keyboard = self.scraper.build_keyboard(
+                ("🔄 刷新热帖", "/hb"),
+                ("❓ 帮助", "/hbhelp"),
+            )
+
+            # 4. 尝试发送带键盘的 Markdown 消息（仅 QQ 官方平台生效）
+            if not await self._try_send_with_keyboard(event, md_text, keyboard):
+                # 非 QQ 平台回退为普通 Markdown 消息
+                chain = [Comp.Plain(md_text)]
+                result = event.chain_result(chain)
+                result.use_markdown(True)
+                yield result
+
+        except AuthError:
+            yield event.plain_result(
+                "⚠️ 未检测到登录凭证，或凭证已失效。\n"
+                "👉 请发送 /hblogin 进行扫码登录。"
+            )
+        except Exception as e:
+            yield event.plain_result(f"❌ 抓取失败: {e}")
+
+    @filter.command("hblogin")
+    async def login_command(self, event: AstrMessageEvent):
+        """扫码登录小黑盒。"""
+
+        yield event.plain_result("🚀 正在生成二维码，请稍候...")
+
+        task_state = LoginTaskState()
+        authenticator = CloakAuthenticator()
+
+        # 启动登录任务
+        login_task = asyncio.ensure_future(authenticator.execute_login_flow(task_state))
+
+        try:
+            # 阶段 1：等待二维码就绪
+            try:
+                await asyncio.wait_for(task_state.qr_ready.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                yield event.plain_result("❌ 获取二维码超时，请重试。")
+                return
+
+            if task_state.error or not task_state.qr_path:
+                yield event.plain_result(f"❌ 获取二维码失败: {task_state.error}")
+                return
+
+            yield event.image_result(task_state.qr_path)
+            yield event.plain_result("👆 请在 2 分钟内扫码完成登录。")
+
+            # 阶段 2：等待扫码完成
+            try:
+                await asyncio.wait_for(task_state.done.wait(), timeout=130)
+            except asyncio.TimeoutError:
+                yield event.plain_result("❌ 登录超时，请重新执行指令。")
+                return
+
+            if task_state.success:
+                yield event.plain_result(
+                    "✅ 扫码成功！凭证已保存。\n"
+                    "👉 现在可以发送 /hb 抓取帖子了。"
+                )
+            else:
+                yield event.plain_result("❌ 登录失败，请重新执行指令。")
+
+        except Exception as e:
+            yield event.plain_result(f"❌ 登录流程异常: {e}")
+        finally:
+            login_task.cancel()
+            if os.path.exists(QR_FILE):
+                os.remove(QR_FILE)
+
+    @filter.command("hbhelp")
+    async def help_command(self, event: AstrMessageEvent):
+        """显示插件帮助信息。"""
+
+        help_text = (
+            "📰 小黑盒热帖插件\n\n"
+            "📋 命令列表：\n"
+            "• /hb — 抓取主页热帖 TOP 5\n"
+            "• /hbpush — 从订阅社区抓取热帖 TOP 8\n"
+            "• /hbsub <ID> — 订阅社区\n"
+            "• /hbunsub <ID> — 取消订阅\n"
+            "• /hbsublist — 查看订阅\n"
+            "• /hblogin — 扫码登录\n"
+            "• /hbhelp — 帮助\n\n"
+            "📌 社区ID：链接中 /link/ 后的数字"
+        )
+        yield event.plain_result(help_text)
+
+    @filter.command("hbsub")
+    async def subscribe_command(self, event: AstrMessageEvent, topic_id: str = ""):
+        """订阅指定社区。"""
+
+        if not topic_id.strip():
+            yield event.plain_result("❌ 请提供社区ID。\n用法：/hbsub 18745\n\n社区ID是链接中 /link/ 后的数字")
+            return
+
+        topic_id = topic_id.strip()
+        group_id = str(event.get_group_id() or event.get_sender_id())
+        success, msg = self.scraper.add_subscription(group_id, topic_id)
+        yield event.plain_result(msg)
+
+    @filter.command("hbunsub")
+    async def unsubscribe_command(self, event: AstrMessageEvent, topic_id: str = ""):
+        """取消订阅指定社区。"""
+
+        if not topic_id.strip():
+            yield event.plain_result("❌ 请提供社区ID。\n用法：/hbunsub 18745")
+            return
+
+        topic_id = topic_id.strip()
+        group_id = str(event.get_group_id() or event.get_sender_id())
+        success, msg = self.scraper.remove_subscription(group_id, topic_id)
+        yield event.plain_result(msg)
+
+    @filter.command("hbsublist")
+    async def list_subscriptions_command(self, event: AstrMessageEvent):
+        """查看当前群的订阅列表。"""
+
+        group_id = str(event.get_group_id() or event.get_sender_id())
+        subs = self.scraper.get_subscriptions(group_id)
+
+        if not subs:
+            yield event.plain_result("📭 当前没有订阅。\n使用 /hbsub <社区ID> 添加订阅。")
+            return
+
+        lines = ["📋 当前订阅的社区：\n"]
+        for i, topic_id in enumerate(subs, 1):
+            lines.append(f"{i}. 社区ID: {topic_id}")
+            lines.append(f"   🔗 https://www.xiaoheihe.cn/app/topic/link/{topic_id}\n")
+        lines.append(f"\n共 {len(subs)} 个订阅")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("hbpush")
+    async def push_command(self, event: AstrMessageEvent):
+        """从订阅社区抓取热帖并推送 TOP 8。"""
+        group_id = str(event.get_group_id() or event.get_sender_id())
+        subs = self.scraper.get_subscriptions(group_id)
+
+        if not subs:
+            yield event.plain_result("📭 当前没有订阅。\n使用 /hbsub <社区ID> 添加订阅。")
+            return
+
+        try:
+            yield event.plain_result(f"⏳ 正在从 {len(subs)} 个订阅社区抓取帖子...")
+            posts = await self.scraper.fetch_subscribed_posts(group_id)
+
+            if not posts:
+                yield event.plain_result("😅 订阅社区暂无帖子。")
+                return
+
+            # 1. 下载封面并拼接为一张图
+            merged_path = await self.scraper.merge_covers(posts, top_n=8)
+            if merged_path:
+                try:
+                    yield event.image_result(merged_path)
+                finally:
+                    if os.path.exists(merged_path):
+                        os.remove(merged_path)
+
+            # 2. 构建 Markdown 文本
+            md_text = self.scraper.format_top_posts_markdown(posts, top_n=8)
+
+            # 3. 构建键盘按钮
+            keyboard = self.scraper.build_keyboard(
+                ("🔄 刷新推送", "/hbpush"),
+                ("📋 订阅列表", "/hbsublist"),
+                ("❓ 帮助", "/hbhelp"),
+            )
+
+            # 4. 尝试发送带键盘的 Markdown 消息
+            if not await self._try_send_with_keyboard(event, md_text, keyboard):
+                chain = [Comp.Plain(md_text)]
+                result = event.chain_result(chain)
+                result.use_markdown(True)
+                yield result
+
+        except AuthError:
+            yield event.plain_result(
+                "⚠️ 未检测到登录凭证，或凭证已失效。\n"
+                "👉 请发送 /hblogin 进行扫码登录。"
+            )
+        except Exception as e:
+            yield event.plain_result(f"❌ 抓取失败: {e}")
 
     async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        """插件卸载/停用时调用。"""
+        pass

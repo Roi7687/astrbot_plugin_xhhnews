@@ -1,14 +1,62 @@
-# astrbot-plugin-helloworld
+# astrbot_plugin_xhhnews
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+小黑盒社区热帖抓取与推送 AstrBot 插件。通过 Cloakbrowser 无头浏览器爬取小黑盒热帖，以 Markdown + 拼接封面图的形式推送到群聊，支持社区订阅和 QQ 键盘按钮。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+## 功能
 
-# Supports
+- **主页热帖抓取** — 从小黑盒主页抓取热度 TOP 5 帖子
+- **社区订阅推送** — 订阅指定社区，从多个社区合并抓取热帖 TOP 8
+- **封面图拼接** — 将帖子封面按 2×4 网格拼接为一张图发送
+- **Markdown 消息** — 使用 QQ Markdown 格式展示帖子摘要
+- **QQ 键盘按钮** — 支持 QQ 官方平台的快捷操作按钮
+- **扫码登录** — 通过二维码完成小黑盒账号登录
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+## 安装
+
+1. 确保 AstrBot 已安装 、、 依赖
+2. 将本仓库克隆到 AstrBot 插件目录：
+
+```bash
+cd /path/to/astrbot/data/plugins
+git clone https://github.com/Roi7687/astrbot_plugin_xhhnews.git
+```
+
+3. 在 AstrBot 管理界面启用插件
+
+## 命令
+
+| 命令 | 功能 |
+|------|------|
+| `/hb` | 抓取主页热帖 TOP 5 |
+| `/hbpush` | 从订阅社区抓取热帖 TOP 8 |
+| `/hbsub <ID>` | 订阅社区 |
+| `/hbunsub <ID>` | 取消订阅 |
+| `/hbsublist` | 查看订阅列表 |
+| `/hblogin` | 扫码登录小黑盒 |
+| `/hbhelp` | 显示帮助 |
+
+## 使用流程
+
+```
+/hblogin          # 首次使用需扫码登录
+/hb               # 抓取主页热帖
+/hbsub 18745      # 订阅社区（ID 为链接中 /link/ 后的数字）
+/hbsub 425422     # 订阅更多社区
+/hbpush           # 从所有订阅社区抓取热帖
+```
+
+## 社区ID获取
+
+社区链接格式为 `https://www.xiaoheihe.cn/app/topic/link/{topic_id}`，其中数字部分即为社区ID。例如：
+- `https://www.xiaoheihe.cn/app/topic/link/18745` → ID 为 `18745`
+
+## 依赖
+
+- [AstrBot](https://github.com/AstrBotDevs/AstrBot) — 插件框架
+- [cloakbrowser](https://pypi.org/project/cloakbrowser/) — 反检测无头浏览器
+- [Pillow](https://pypi.org/project/Pillow/) — 图片处理
+- [httpx](https://pypi.org/project/httpx/) — 异步 HTTP 客户端
+
+## License
+
+AGPL-3.0
