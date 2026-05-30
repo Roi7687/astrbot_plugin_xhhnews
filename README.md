@@ -6,6 +6,7 @@
 
 - **主页热帖抓取** — 从小黑盒主页抓取热度 TOP 5 帖子
 - **社区订阅推送** — 订阅指定社区，从多个社区合并抓取热帖 TOP 8
+- **名称搜索订阅** — 输入社区名称自动搜索并订阅，无需手动查找 ID
 - **封面图拼接** — 将帖子封面按 2×4 网格拼接为一张图发送
 - **Markdown 消息** — 使用 QQ Markdown 格式展示帖子摘要
 - **QQ 键盘按钮** — 支持 QQ 官方平台的快捷操作按钮
@@ -13,7 +14,7 @@
 
 ## 安装
 
-1. 确保 AstrBot 已安装 、、 依赖
+1. 确保 AstrBot 已安装 `cloakbrowser`、`Pillow`、`httpx` 依赖
 2. 将本仓库克隆到 AstrBot 插件目录：
 
 ```bash
@@ -29,7 +30,7 @@ git clone https://github.com/Roi7687/astrbot_plugin_xhhnews.git
 |------|------|
 | `/hb` | 抓取主页热帖 TOP 5 |
 | `/hbpush` | 从订阅社区抓取热帖 TOP 8 |
-| `/hbsub <ID>` | 订阅社区 |
+| `/hbsub <ID 或 名称>` | 订阅社区 |
 | `/hbunsub <ID>` | 取消订阅 |
 | `/hbsublist` | 查看订阅列表 |
 | `/hblogin` | 扫码登录小黑盒 |
@@ -40,15 +41,10 @@ git clone https://github.com/Roi7687/astrbot_plugin_xhhnews.git
 ```
 /hblogin          # 首次使用需扫码登录
 /hb               # 抓取主页热帖
-/hbsub 18745      # 订阅社区（ID 为链接中 /link/ 后的数字）
-/hbsub 425422     # 订阅更多社区
+/hbsub 数码硬件   # 按名称搜索并订阅社区
+/hbsub 18745      # 或直接用 ID 订阅
 /hbpush           # 从所有订阅社区抓取热帖
 ```
-
-## 社区ID获取
-
-社区链接格式为 `https://www.xiaoheihe.cn/app/topic/link/{topic_id}`，其中数字部分即为社区ID。例如：
-- `https://www.xiaoheihe.cn/app/topic/link/18745` → ID 为 `18745`
 
 ## 依赖
 

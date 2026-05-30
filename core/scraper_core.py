@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import tempfile
 from io import BytesIO
 
@@ -331,7 +332,6 @@ class XhhScraperCore:
             await page.wait_for_timeout(3000)
 
             # 3. 从跳转后的 URL 提取 topic ID
-            import re
             current_url = page.url
             match = re.search(r"/topic/link/(\d+)", current_url)
             if not match:

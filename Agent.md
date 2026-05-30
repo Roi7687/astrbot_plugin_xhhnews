@@ -11,6 +11,7 @@ core/
     config.py           # 路径常量、订阅数据读写
     login_core.py       # 扫码登录流程
     scraper_core.py     # 浏览器抓取、图片拼接、Markdown 格式化、键盘按钮、订阅管理
+    xhh_api.py          # 小黑盒 API 签名工具（hkey/nonce 生成）
 ```
 
 ## 核心模块
@@ -24,6 +25,8 @@ core/
 - `merge_covers()` — 下载封面图，按 2×4 网格拼接为一张
 - `format_top_posts_markdown()` — 生成 QQ Markdown 格式文本
 - `build_keyboard()` — 构建 QQ 官方键盘按钮数据
+- `search_topic()` — 通过浏览器搜索框搜索社区，返回 (topic_id, topic_name)
+- `fetch_topic_name()` — 从社区页面抓取社区名称
 - 订阅管理：`add_subscription()` / `remove_subscription()` / `get_subscriptions()`
 
 ### login_core.py — 扫码登录
@@ -35,7 +38,14 @@ core/
 
 - 路径常量：`AUTH_STATE_FILE`、`QR_FILE`、`SUBSCRIBE_FILE`
 - URL 模板：`COMMUNITY_URL`（主页）、`TOPIC_URL_TEMPLATE`（社区）
-- `load_subscriptions()` / `save_subscriptions()` — JSON 订阅数据持久化
+- `load_subscriptions()` / `save_subscriptions()` — JSON 订阅数据持久化（兼容旧 list 格式）
+
+### xhh_api.py — API 签名
+
+基于小黑盒 Web 前端逆向的 hkey/nonce 生成算法。关键发现：
+- hkey 使用 `t+1` 时间偏移（`Wm[3]="g"`, `lv.g = ov(e, t+1, n)`）
+- 交错拼接不排序，按原始顺序逐位取字符
+- `Km` 函数需保留全部 6 元素求和（JS 修改原数组前 4 位后 reduce 对全部元素求和）
 
 ## 命令列表
 
@@ -43,7 +53,7 @@ core/
 |------|------|
 | `/hb` | 抓取主页热帖 TOP 5 |
 | `/hbpush` | 从订阅社区抓取热帖 TOP 8 |
-| `/hbsub <ID>` | 订阅社区 |
+| `/hbsub <ID 或 名称>` | 订阅社区（支持 ID 和名称搜索） |
 | `/hbunsub <ID>` | 取消订阅 |
 | `/hbsublist` | 查看订阅列表 |
 | `/hblogin` | 扫码登录 |
@@ -68,8 +78,8 @@ core/
 
 ```json
 {
-  "group_id_1": ["18745", "425422"],
-  "group_id_2": ["18745"]
+  "group_id_1": {"18745": "数码硬件", "425422": "Steam"},
+  "group_id_2": {"18745": "数码硬件"}
 }
 ```
 
