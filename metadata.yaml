@@ -1,6 +1,6 @@
 name: xhhnews
 display_name: 小黑盒热帖推送
-desc: 定期爬取小黑盒社区帖子，推送到群聊。
-version: v1.0.0
+desc: 抓取小黑盒社区热帖与游戏发售日历，推送到群聊。
+version: v1.1.0
 author: Roi
 repo: https://github.com/Roi7687/astrbot_plugin_xhhnews

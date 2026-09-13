@@ -9,6 +9,10 @@ SUBSCRIBE_FILE = os.path.join(PLUGIN_DIR, "subscriptions.json")
 COMMUNITY_URL = "https://www.xiaoheihe.cn/app/bbs/home"
 TOPIC_URL_TEMPLATE = "https://www.xiaoheihe.cn/app/topic/link/{topic_id}"
 
+# 发售日历接口只在 api 域名的根路径下
+CALENDAR_API_HOST = "https://api.xiaoheihe.cn"
+CALENDAR_PAGE_URL = "https://www.xiaoheihe.cn/game/publish_calendar"
+
 
 class AuthError(Exception):
     """未找到登录凭证或凭证已失效"""

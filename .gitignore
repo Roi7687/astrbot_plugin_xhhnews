@@ -210,3 +210,6 @@ __marimo__/
 auth_state.json
 subscriptions.json
 qrcode.png
+
+# 开发期联调脚本与产物
+tools/
