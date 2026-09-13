@@ -6,6 +6,7 @@
     - game/release_calendar/game_list/single_day  单日完整列表（本月日历用这个）
     - game/release_calendar/game_count            每月每天的发售数量（整月覆盖）
     - game/release_calendar/filters               筛选项定义
+    - game/get_game_detail/                       单款游戏详情（历史日期的标签只能靠它）
 
 只有 game_list/single_day 与 game_count 是权威数据源：
     * single_day 返回该日全部游戏（实测与 game_count 的每日数量一致）；
@@ -20,11 +21,13 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import re
 from dataclasses import dataclass, field
 
 import httpx
 
 from .config import CALENDAR_API_HOST, AuthError
+from .tag_cache import TagCache
 from .xhh_api import generate_sign_params
 
 logger = logging.getLogger("astrbot")
@@ -34,6 +37,7 @@ GAME_COUNT_PATH = "/game/release_calendar/game_count"
 GAME_LIST_PATH = "/game/release_calendar/game_list"
 SINGLE_DAY_PATH = "/game/release_calendar/game_list/single_day"
 FILTERS_PATH = "/game/release_calendar/filters"
+GAME_DETAIL_PATH = "/game/get_game_detail/"
 
 BEIJING_TZ = dt.timezone(dt.timedelta(hours=8))
 
@@ -43,13 +47,26 @@ _CONCURRENCY = 3
 _RETRY_DELAYS = (2.0, 6.0, 14.0)
 _MAX_ATTEMPTS = 4
 
+# 详情接口并发上限（补标签是批量操作，比日历接口略高一点但仍要克制）
+_TAG_CONCURRENCY = 4
+
 _WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
-# 平台类标签（作为「类型」展示时不如玩法标签有信息量，优先级最低）
+# 平台类标签（作为「类型」展示时不如玩法标签有信息量，直接丢弃）
 _WEAK_TAGS = ("pc", "主机", "手机", "ios", "android", "客户端", "官方平台")
 
-# game_type 回退时的中文名
-_GAME_TYPE_CN = {"pc": "PC", "console": "主机", "mobile": "手机"}
+# 展示层的最后兜底：接口连标签都没有时，至少标出游戏平台
+_FALLBACK_TAGS = {"pc": "PC", "console": "主机", "mobile": "手机"}
+
+# 详情接口 common_tags 里的营销/状态类标签，不是游戏类型，直接丢弃。
+# 注意：独立 / 抢先体验 / 单人 / 在线合作 都是 Steam 真实分类，必须保留。
+_NOISE_TAGS = frozenset({
+    "心愿单热门", "近期热销", "热销", "热门", "即将推出", "已发售", "预售",
+    "新品", "折扣", "史低", "免费", "限时", "推荐", "独家", "特惠",
+})
+
+# 「支持中文」「支持手柄」这类平台功能标签同样不是游戏类型
+_NOISE_TAG_RE = re.compile(r"^支持.{0,6}$|^兼容.{0,6}$")
 
 # 非游戏条目（影视、周边等）常见的 type
 _NON_GAME_TYPES = ("video", "movie", "tv", "anime", "hardware", "goods")
@@ -66,7 +83,6 @@ class CalendarError(Exception):
 class GameItem:
     name: str
     tags: list[str] = field(default_factory=list)
-    image: str = ""
     platforms: list[str] = field(default_factory=list)
     game_type: str = ""
     steam_appid: int | None = None
@@ -76,6 +92,21 @@ class GameItem:
     @property
     def first_tag(self) -> str:
         return self.tags[0] if self.tags else ""
+
+    @property
+    def platform_label(self) -> str:
+        """平台的中文名，作为没有玩法标签时的兜底。"""
+        gt = (self.game_type or "").strip().lower()
+        if gt in _FALLBACK_TAGS:
+            return _FALLBACK_TAGS[gt]
+        if self.platforms:
+            return self.platforms[0].upper()
+        return ""
+
+    @property
+    def display_tag(self) -> str:
+        """用于展示的标签：优先玩法标签，其次平台。"""
+        return self.first_tag or self.platform_label
 
     @property
     def tags_text(self) -> str:
@@ -104,8 +135,10 @@ class DayRelease:
 class XhhCalendarCore:
     """发售日历抓取核心。"""
 
-    def __init__(self) -> None:
+    def __init__(self, tag_cache: TagCache | None = None) -> None:
         self._sem = asyncio.Semaphore(_CONCURRENCY)
+        self._tag_sem = asyncio.Semaphore(_TAG_CONCURRENCY)
+        self._tag_cache = tag_cache or TagCache()
 
     # ---------- 基础请求 ----------
 
@@ -160,31 +193,35 @@ class XhhCalendarCore:
     # ---------- 字段解析 ----------
 
     @staticmethod
-    def _pick_tag(game: dict) -> list[str]:
-        """取玩法标签：hot_tags -> genres -> game_type（主机/PC/手机）。
+    def _clean_tags(raw_tags: list[str]) -> list[str]:
+        """过滤噪音标签、去重并保序。日历接口与详情接口共用。"""
+        seen: set[str] = set()
+        out: list[str] = []
+        for t in raw_tags:
+            if not isinstance(t, str):
+                continue
+            tag = t.strip()
+            key = tag.lower()
+            if not key or key in seen:
+                continue
+            if key in _WEAK_TAGS or tag in _NOISE_TAGS or _NOISE_TAG_RE.match(tag):
+                continue
+            seen.add(key)
+            out.append(tag)
+        return out
 
-        少量条目（多为主机独占）没有 hot_tags，此时退回 game_type，
-        避免「类型」这一列整片空白。
+    @classmethod
+    def _pick_tag(cls, game: dict) -> list[str]:
+        """取日历接口给出的玩法标签：hot_tags -> genres。
+
+        历史日期服务端不返回 hot_tags，这里会得到空列表，由 `enrich_tags()`
+        走游戏详情接口补齐；展示层再用平台（PC/主机/手机）做最后兜底。
+        数据层保持「真实标签」语义，否则补全逻辑会误以为已经有标签了。
         """
         raw_tags = [t.get("desc") for t in (game.get("hot_tags") or []) if t.get("desc")]
         if not raw_tags:
             raw_tags = [g for g in (game.get("genres") or []) if g]
-        strong = [t for t in raw_tags if t.strip().lower() not in _WEAK_TAGS]
-        tags = strong or raw_tags
-
-        if not tags and game.get("game_type"):
-            gt = str(game["game_type"]).strip()
-            tags = [_GAME_TYPE_CN.get(gt.lower(), gt)]
-
-        # 去重并保序
-        seen: set[str] = set()
-        out: list[str] = []
-        for t in tags:
-            key = t.strip().lower()
-            if key and key not in seen:
-                seen.add(key)
-                out.append(t.strip())
-        return out
+        return cls._clean_tags(raw_tags)
 
     @classmethod
     def _parse_game(cls, game: dict) -> GameItem | None:
@@ -203,7 +240,6 @@ class XhhCalendarCore:
         return GameItem(
             name=name,
             tags=cls._pick_tag(game),
-            image=(game.get("image") or "").strip(),
             platforms=[p for p in (game.get("platforms") or []) if p],
             game_type=(game.get("game_type") or "").strip(),
             steam_appid=appid,
@@ -332,7 +368,13 @@ class XhhCalendarCore:
         if missing and window:
             logger.debug(f"[XhhCalendar] 以下日期无数据: {missing}")
 
-        return [DayRelease(date=d, games=fetched.get(d, [])) for d in days]
+        releases = [DayRelease(date=d, games=fetched.get(d, [])) for d in days]
+
+        # 历史日期服务端不给 hot_tags，用详情接口补一次（走缓存）
+        all_games = [g for day in releases for g in day.games]
+        await self.enrich_tags(all_games, limit=40)
+
+        return releases
 
     async def _safe_fetch_day(
         self, client: httpx.AsyncClient, day: dt.date
@@ -345,6 +387,79 @@ class XhhCalendarCore:
             logger.debug(f"[XhhCalendar] 单日抓取失败 {day}: {exc}")
             return []
 
+    # ---------- 标签补全（历史日期用） ----------
+
+    async def _fetch_detail_tag(
+        self, client: httpx.AsyncClient, appid: int
+    ) -> list[str]:
+        """从游戏详情接口取一款游戏的玩法标签。
+
+        详情接口的 `common_tags` 里 `type == "simple_tag"` 的 `desc`
+        就是玩法标签（与日历接口的 hot_tags 同源），营销类标签会被过滤。
+        """
+        try:
+            async with self._tag_sem:
+                result = await self._request(
+                    client, GAME_DETAIL_PATH, {"steam_appid": str(appid)}
+                )
+        except Exception as exc:
+            logger.debug(f"[XhhCalendar] 详情接口取标签失败 {appid}: {exc}")
+            return []
+
+        raw = [
+            t.get("desc")
+            for t in (result.get("common_tags") or [])
+            if t.get("type") == "simple_tag" and t.get("desc")
+        ]
+        return self._clean_tags(raw)
+
+    async def enrich_tags(
+        self,
+        games: list[GameItem],
+        limit: int = 60,
+    ) -> None:
+        """就地补齐缺失的游戏标签。
+
+        只处理「日历接口没给标签、但有 steam_appid」的游戏，并优先命中本地缓存；
+        仍未命中的按 `limit` 上限并发拉详情，避免一次查询打太多请求。
+        """
+        pending: list[GameItem] = []
+        for g in games:
+            if g.tags or not g.steam_appid:
+                continue
+            cached = self._tag_cache.get(g.steam_appid)
+            if cached:
+                g.tags = cached
+            else:
+                pending.append(g)
+
+        if not pending:
+            self._tag_cache.save()
+            return
+
+        targets = pending[:limit]
+        skipped = len(pending) - len(targets)
+
+        async with self._client() as client:
+            results = await asyncio.gather(
+                *(self._fetch_detail_tag(client, g.steam_appid) for g in targets),
+                return_exceptions=True,
+            )
+
+        for game, tags in zip(targets, results):
+            if isinstance(tags, BaseException) or not tags:
+                continue
+            game.tags = tags
+            self._tag_cache.put(game.steam_appid, tags)
+
+        self._tag_cache.save()
+
+        if skipped:
+            logger.info(
+                f"[XhhCalendar] 标签补全达到单次上限 {limit}，"
+                f"还有 {skipped} 款未补（下次查询会继续）"
+            )
+
     # ---------- 对外：本月 ----------
 
     async def fetch_month(
@@ -355,7 +470,9 @@ class XhhCalendarCore:
         Returns:
             (每天的发售列表, {日期: 数量}, 本月总数量)
 
-        数量表来自 game_count（整月完整），列表来自 single_day（能取到就有名称）。
+        数量表来自 game_count（整月完整），列表用「批量窗口 + 逐日」组合获取：
+        批量接口一次能覆盖约 8 天（且 hot_tags 最全），剩下的日子再逐日补，
+        这样请求数从 31 次降到约 24 次。
         对已经过去、接口不再提供明细的日子，列表为空但数量仍在，
         由上层用数量渲染，保证「本月日历」不出现空洞。
         """
@@ -370,22 +487,41 @@ class XhhCalendarCore:
 
         async with self._client() as client:
             counts_task = asyncio.create_task(self.fetch_month_counts(client))
+
+            # 批量窗口：服务端只认「今天及以后」，所以先用今天试一次，
+            # 命中本月哪些天就用哪些天，剩下的逐日补。
+            fetched: dict[dt.date, list[GameItem]] = {}
+            try:
+                window = await self.fetch_window(client, today)
+                fetched.update({d: g for d, g in window.items() if d in set(days)})
+            except Exception as exc:
+                logger.debug(f"[XhhCalendar] 本月批量窗口失败: {exc}")
+
+            rest = [d for d in days if d not in fetched]
             day_results = await asyncio.gather(
-                *(self._safe_fetch_day(client, d) for d in days),
+                *(self._safe_fetch_day(client, d) for d in rest),
                 return_exceptions=True,
             )
+
             try:
                 counts = await counts_task
             except Exception as exc:
                 logger.warning(f"[XhhCalendar] 获取每月数量失败: {exc}")
                 counts = {}
 
+        for day, res in zip(rest, day_results):
+            fetched[day] = [] if isinstance(res, BaseException) else res
+
         releases: list[DayRelease] = []
-        for day, res in zip(days, day_results):
-            games = [] if isinstance(res, BaseException) else res
-            releases.append(DayRelease(date=day, games=games))
+        for day in days:
+            releases.append(DayRelease(date=day, games=fetched.get(day, [])))
 
         month_total = sum(counts.get(d, 0) for d in days)
+
+        # 本月里已过去的日子同样没有标签，用详情接口补（走缓存，受单次上限保护）
+        all_games = [g for day in releases for g in day.games]
+        await self.enrich_tags(all_games, limit=80)
+
         return releases, counts, month_total
 
     # ---------- HTTP 客户端 ----------
@@ -406,73 +542,3 @@ class XhhCalendarCore:
             },
             limits=httpx.Limits(max_connections=_CONCURRENCY + 2, max_keepalive_connections=_CONCURRENCY),
         )
-
-
-# ────────────────────────── 图片拼接 ──────────────────────────
-
-
-class CoverCollage:
-    """把多个游戏封面按顺序拼成一张总览图（不渲染文字，文字由 Markdown 承载）。"""
-
-    def __init__(self, cols: int = 3, cell_w: int = 400, cell_h: int = 187, gap: int = 6):
-        self.cols = cols
-        self.cell_w = cell_w
-        self.cell_h = cell_h
-        self.gap = gap
-
-    async def build(self, games: list[GameItem]) -> bytes | None:
-        """并发下载封面并拼接，返回 PNG 字节；无可下载封面时返回 None。"""
-        urls = [g.image for g in games if g.image.startswith(("http://", "https://"))]
-        if not urls:
-            return None
-
-        urls = urls[: self.cols * 8]  # 最多 24 张（3 列 8 行），避免图过长
-        images = await asyncio.gather(*(self._download(u) for u in urls))
-        images = [im for im in images if im is not None]
-        if not images:
-            return None
-
-        from PIL import Image as PILImage
-
-        cells = [self._fit(im) for im in images]
-        rows = (len(cells) + self.cols - 1) // self.cols
-        canvas_w = self.cols * self.cell_w + self.gap * (self.cols - 1)
-        canvas_h = rows * self.cell_h + self.gap * (rows - 1)
-
-        canvas = PILImage.new("RGB", (canvas_w, canvas_h), (28, 28, 32))
-        for idx, im in enumerate(cells):
-            r, c = divmod(idx, self.cols)
-            canvas.paste(im, (c * (self.cell_w + self.gap), r * (self.cell_h + self.gap)))
-
-        from io import BytesIO
-
-        buf = BytesIO()
-        canvas.save(buf, format="PNG", optimize=True)
-        return buf.getvalue()
-
-    def _fit(self, img):
-        """等比缩放后居中裁剪到统一格子。"""
-        from PIL import Image as PILImage
-
-        img = img.convert("RGB")
-        ratio = max(self.cell_w / img.width, self.cell_h / img.height)
-        new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
-        img = img.resize(new_size, PILImage.LANCZOS)
-        left = (img.width - self.cell_w) // 2
-        top = (img.height - self.cell_h) // 2
-        return img.crop((left, top, left + self.cell_w, top + self.cell_h))
-
-    @staticmethod
-    async def _download(url: str):
-        from io import BytesIO
-
-        from PIL import Image as PILImage
-
-        try:
-            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
-                resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                resp.raise_for_status()
-                return PILImage.open(BytesIO(resp.content))
-        except Exception as exc:
-            logger.debug(f"[XhhCalendar] 封面下载失败 {url}: {exc}")
-            return None

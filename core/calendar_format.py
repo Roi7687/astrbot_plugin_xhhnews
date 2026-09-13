@@ -16,17 +16,16 @@ _WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周�
 
 def _tag_suffix(game: GameItem) -> str:
     """统一的标签后缀：`标签`（没有标签时为空）。"""
-    return f"　`{game.first_tag}`" if game.first_tag else ""
+    tag = game.display_tag
+    return f"　`{tag}`" if tag else ""
 
 
 def _join_games(games: list[GameItem], *, with_tags: bool = True) -> str:
     """把游戏列表拼成一行行「名称+标签」。"""
     parts = []
     for g in games:
-        if with_tags and g.first_tag:
-            parts.append(f"{g.name} `{g.first_tag}`")
-        else:
-            parts.append(g.name)
+        tag = g.display_tag if with_tags else ""
+        parts.append(f"{g.name} `{tag}`" if tag else g.name)
     return "、".join(parts)
 
 
@@ -43,10 +42,9 @@ def format_week_markdown(days: list[DayRelease], today: dt.date | None = None) -
     lines.append(f"> 共 **{total}** 款新游 · 数据来自小黑盒\n")
 
     for day in days:
-        mark = "**今天** · " if day.date == today else ""
         header = f"## {day.long_label}"
-        if mark:
-            header += f"　{mark}"
+        if day.date == today:
+            header += "　**今天**"
         lines.append(header + "\n")
 
         if not day.games:
@@ -57,7 +55,6 @@ def format_week_markdown(days: list[DayRelease], today: dt.date | None = None) -
             lines.append(f"- {g.name}{_tag_suffix(g)}\n")
         lines.append("")
 
-    lines.append("\n> 封面图按上方顺序排列，每行 3 款。")
     return "".join(lines)
 
 

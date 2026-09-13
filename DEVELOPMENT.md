@@ -1,56 +1,28 @@
 # 开发文档
 
-本插件有两条完全独立的数据链路，改代码前先确认你在动哪一条：
-
-| 链路 | 通道 | 认证 | 模块 |
-|------|------|------|------|
-| 社区热帖 | Cloakbrowser 无头浏览器渲染页面后取 DOM | 需要扫码登录 | `scraper_core.py` / `login_core.py` |
-| 游戏发售日历 | 直连 HTTP 接口（复刻 APP 请求） | **无需登录** | `calendar_core.py` |
+小黑盒游戏发售日历插件。所有数据都走小黑盒的 HTTP 接口（复刻 APP 请求），
+签名复用 Web 端的 hkey 算法，**不需要登录**。
 
 ## 项目结构
 
 ```
-main.py                  # 插件入口，命令注册与消息发送
+main.py                  # 插件入口：命令注册与消息发送
 metadata.yaml            # 插件元数据
 core/
-    config.py            # 路径常量、URL、订阅数据读写
-    login_core.py        # 扫码登录流程
-    scraper_core.py      # 浏览器抓取、封面拼接、Markdown 格式化、键盘按钮、订阅管理
-    xhh_api.py           # 小黑盒 API 签名工具（hkey/nonce 生成）
-    calendar_core.py     # 发售日历抓取（直连接口 + 封面拼接）
+    config.py            # 路径常量、接口域名、共用异常
+    calendar_core.py     # 发售日历抓取（数据模型、接口调用、标签补全）
     calendar_format.py   # 发售日历的 Markdown 排版
+    tag_cache.py         # 游戏标签的本地缓存
+    xhh_api.py           # 小黑盒 API 签名工具（hkey/nonce 生成）
 ```
 
 ## 核心模块
 
 ### config.py — 配置与数据
 
-- 路径常量：`AUTH_STATE_FILE`、`QR_FILE`、`SUBSCRIBE_FILE`
-- URL 常量：`COMMUNITY_URL`（主页）、`TOPIC_URL_TEMPLATE`（社区）、
-  `CALENDAR_API_HOST`（日历接口域名）、`CALENDAR_PAGE_URL`（APP 内日历页路由）
-- `load_subscriptions()` / `save_subscriptions()` — JSON 订阅数据持久化（兼容旧 list 格式）
-
-### scraper_core.py — 帖子抓取与格式化
-
-- `fetch_posts()` — 从小黑盒主页抓取帖子列表
-- `fetch_topic_posts()` — 从指定社区页面抓取帖子
-- `fetch_subscribed_posts()` — 遍历所有订阅社区，合并抓取结果
-- `pick_top_posts()` — 按点赞 + 评论综合热度排序，取前 N 条
-- `merge_covers()` — 下载封面图，按 2×4 网格拼接为一张
-- `format_top_posts_markdown()` — 生成 QQ Markdown 格式文本
-- `build_keyboard()` — 构建 QQ 官方键盘按钮数据
-- `search_topic()` — 通过浏览器搜索框搜索社区，返回 `(topic_id, topic_name)`
-- `fetch_topic_name()` — 从社区页面抓取社区名称
-- 订阅管理：`add_subscription()` / `remove_subscription()` / `get_subscriptions()`
-
-> 帖子数据靠 `EXTRACT_POSTS_JS` 在页面里跑一段 JS 取 DOM，
-> 所以**小黑盒改版 Web 结构会让抓取失效**，改动集中在那个常量里。
-
-### login_core.py — 扫码登录
-
-- `CloakAuthenticator` 启动浏览器实例，打开登录页，截取二维码
-- `LoginTaskState` 作为 async 信号桥，协调「二维码就绪」与「扫码完成」事件
-- 登录态落在 `auth_state.json`（已在 `.gitignore` 中）
+- `PLUGIN_DIR`、`TAG_CACHE_FILE` — 插件目录与标签缓存路径
+- `CALENDAR_API_HOST` — 接口域名 `https://api.xiaoheihe.cn`
+- `CALENDAR_PAGE_URL` — APP 内日历页路由（仅作参考，不可直接 HTTP 访问）
 
 ### xhh_api.py — API 签名
 
@@ -61,81 +33,86 @@ core/
 - `Km` 函数需保留全部 6 元素求和（JS 修改原数组前 4 位后 reduce 对全部元素求和）
 
 `generate_sign_params(path)` 产出全套公共参数（`os_type` / `client_type` /
-`version` / `hkey` / `_time` / `nonce` 等）。**日历接口与帖子接口共用这一套签名**，
-服务端对二者都做校验：缺 `hkey` 返回 `hkey 不能为空`，缺 `_time` 返回 `_time 不能为空`。
+`version` / `hkey` / `_time` / `nonce` 等）。服务端会强校验：
+缺 `hkey` 返回 `hkey 不能为空`，缺 `_time` 返回 `_time 不能为空`。
 
-### calendar_core.py — 游戏发售日历
+### calendar_core.py — 发售日历
 
 接口来自小黑盒 APP 1.3.395 反编译（`com.max.xiaoheihe.network.HeyBoxService`），
 域名 `https://api.xiaoheihe.cn`，**路径在根级别，没有 `/bbs/app/api` 前缀**：
 
 | 用途 | 路径 | 说明 |
 |------|------|------|
-| 单日完整列表 | `/game/release_calendar/game_list/single_day` | 参数 `day_timestamp`，本月日历用它 |
-| 批量窗口 | `/game/release_calendar/game_list` | 返回「当天起约一周」的分组，标签最全，本周用它 |
+| 单日完整列表 | `/game/release_calendar/game_list/single_day` | 参数 `day_timestamp` |
+| 批量窗口 | `/game/release_calendar/game_list` | 返回「当天起约 8 天」的分组，`hot_tags` 最全 |
 | 每日数量 | `/game/release_calendar/game_count` | 覆盖 24 个月，整月概览用它 |
 | 筛选项 | `/game/release_calendar/filters` | `filter_hot`(all/hot)、`filter_platform`(pc/xbox/switch/ps4) |
+| 游戏详情 | `/game/get_game_detail/` | 参数 `steam_appid`，历史日期的标签只能靠它 |
 
 关键口径（均为实测结论，改代码前务必读）：
 
 - 签名复用 Web 端 hkey 算法，`heybox_id=-1` 即可，**无需登录**；
 - `day_timestamp` 只认「当天及以后」，传过去的日期会返回今天起的窗口；
 - `offset` / `limit` / `page` **被服务端忽略**，批量接口按组截断（每天最多 30 款）；
-- `game_count` 是唯一整月完整的数据源，`count_by_day[].count` 与 `single_day` 的实际条数一致；
-- **已过去日期的 `hot_tags` 返回 `null`**，只有未来日期才有玩法标签，
-  因此历史日期只能退化为 `game_type`（PC/主机/手机）；
+- `game_count` 是唯一整月完整的数据源，`count_by_day[].count` 与 `single_day` 实际条数一致；
+- **已过去日期的 `hot_tags` 返回 `null`**，只有未来日期才有玩法标签；
+- 详情接口一次只能查一款游戏（`appids` 参数是另一个接口，且 `genres` 为空）；
 - 请求过密会被直接掐断连接（`SSL EOF`），需低并发 + 退避重试
-  （`_CONCURRENCY=3`，重试间隔 2/6/14 秒，最多 4 次）。
+  （日历接口并发 3，重试间隔 2/6/14 秒，最多 4 次；详情接口并发 4）。
 
-标签取值顺序：`hot_tags[].desc` → `genres[]` → `game_type`（映射为 PC/主机/手机）。
+#### 标签是怎么来的
 
-数据模型：`GameItem`（单款游戏）、`DayRelease`（某一天的列表）。
-`CoverCollage` 负责封面拼接：等比缩放 + 居中裁剪，默认 3 列、每格 400×187、最多 24 张，
-**不在图上渲染文字**（中文渲染依赖系统字体，跨平台不稳），文字全部交给 Markdown。
+1. `hot_tags[].desc` —— 日历接口直接给（仅限未来的日期）；
+2. 缺标签时用 `steam_appid` 查 `/game/get_game_detail/`，取
+   `common_tags` 中 `type == "simple_tag"` 的 `desc`；
+3. 结果写入 `tag_cache.json`（7 天有效），避免重复请求；
+4. 仍然没有标签时，展示层退化显示平台（`PC` / `主机` / `手机`）。
 
-### calendar_format.py — 日历排版
+标签清洗规则（`_clean_tags`）：
 
-- 本周：每天「游戏名 + 标签」列表，封面图另拼成一张 3 列总览图发送
-- 本月：每天「游戏名 + 第一个标签」，不发图；配一个月概览（每天几款）
-- 历史日期无明细时，本月视图退化为「本月早些时候（仅统计）」的数量行
+- 丢弃营销/状态类噪音：`心愿单热门`、`近期热销`、`折扣` 等（见 `_NOISE_TAGS`）；
+- 丢弃 `支持中文`、`支持手柄` 这类平台功能标签（正则 `_NOISE_TAG_RE`）；
+- **保留** `独立`、`抢先体验`、`单人`、`在线合作` —— 这些是 Steam 的真实分类。
+
+> 注意：`GameItem.tags` 只存真实玩法标签，平台兜底放在
+> `GameItem.display_tag` 属性里。否则 `enrich_tags()` 会把兜底值当
+> 「已有标签」而跳过补全（这是踩过的坑）。
+
+#### 请求策略
+
+- 本周：批量窗口一次覆盖「今天起约 8 天」，本周里已过去的日子再用 `single_day` 补；
+- 本月：先用批量窗口覆盖月初之后的日子，剩余日子逐个 `single_day`，共约 24 次请求；
+- 标签补全有单次上限（本周 40、本月 80），未补完的留到下次查询继续。
+
+### calendar_format.py — 排版
+
+- 本周：每天「游戏名 + 标签」列表
+- 本月：每天「游戏名 + 第一个标签」，配一个月概览（每天几款）
+- 历史日期无明细时，退化为「本月早些时候（仅统计）」的数量行
+
+### tag_cache.py — 标签缓存
+
+`{"<steam_appid>": {"tags": [...], "ts": <int>}}`，TTL 7 天。
+写入用「临时文件 + `os.replace`」，失败只记日志不影响主流程。
+路径可用环境变量 `XHH_TAG_CACHE` 覆盖（便于测试）。
 
 ## 命令列表
 
 | 命令 | 功能 |
 |------|------|
-| `/hb` | 抓取主页热帖 TOP 5 |
-| `/hbpush` | 从订阅社区抓取热帖 TOP 8 |
-| `/hbsub <ID 或 名称>` | 订阅社区（支持 ID 和名称搜索） |
-| `/hbunsub <ID>` | 取消订阅 |
-| `/hbsublist` | 查看订阅列表 |
-| `/hbweek` | 本周游戏发售日历（含封面总览图） |
-| `/hbmonth [YYYY-MM]` | 本月游戏发售日历（可指定月份） |
-| `/hblogin` | 扫码登录 |
+| `/hbweek` | 本周游戏发售日历 |
+| `/hbmonth [YYYY-MM]` | 本月（或指定月份）游戏发售日历 |
 | `/hbhelp` | 帮助 |
 
 ## 消息格式
 
-- 帖子封面先下载并拼接为 2×4 网格（单张图片），通过 `event.image_result()` 发送
-- 日历封面（`/hbweek`）拼接为 3 列总览图，顺序与文字列表一致
 - 文本以 QQ Markdown（`msg_type=2`）发送，支持标题、引用、列表等语法
 - QQ 官方平台额外支持键盘按钮（`keyboard` 参数），非 QQ 平台回退纯文本
-- 临时图片写入系统临时目录，发送后立即删除
+- **不发送图片**
 
 ## 数据存储
 
-订阅数据存 `subscriptions.json`：
-
-```json
-{
-  "group_id_1": {"18745": "数码硬件", "425422": "Steam"},
-  "group_id_2": {"18745": "数码硬件"}
-}
-```
-
-社区 ID 为链接 `https://www.xiaoheihe.cn/app/topic/link/{topic_id}` 中的数字部分。
-
-登录态存 `auth_state.json`（Playwright storage_state 格式）。
-两个文件都在 `.gitignore` 中，不要提交。
+只有 `tag_cache.json`（已在 `.gitignore` 中，不要提交）。
 
 ## 本地调试
 
@@ -143,22 +120,21 @@ core/
 # 语法检查
 python -m py_compile main.py core/*.py
 
-# 日历核心直连联调（不依赖 AstrBot）
-python tools/dry_run_calendar.py
+# 集成测试：用 AstrBot 运行环境加载插件并跑命令，
+# 结果写入 tools/plugin_test_out.txt
+<astrbot venv>/python.exe tools/test_calendar.py week month month-bad help
 ```
 
-`tools/` 下的脚本是开发期用的联调工具，不属于插件运行时，可按需保留或删除。
-调试日历接口时注意：**连续快速请求会被限流**，脚本里都加了请求间隔。
+`tools/` 下的脚本是开发期联调工具，不属于插件运行时。
+调试接口时注意：**连续快速请求会被限流**（连接被掐断），脚本里都加了间隔。
 
 ## 依赖
 
 - `astrbot` — 插件框架与消息组件
-- `cloakbrowser` — 反检测无头浏览器（帖子抓取）
-- `Pillow` — 图片下载与拼接
-- `httpx` — 异步 HTTP 客户端（日历接口、图片下载）
+- `httpx` — 异步 HTTP 客户端
 
 ## 已知限制
 
-- 已过去日期的游戏标签接口不返回，只能显示平台（PC/主机/手机）
-- 帖子抓取依赖小黑的 Web 页面结构，对方改版需同步更新 `EXTRACT_POSTS_JS`
+- 已过去日期的标签必须逐个查详情接口，首次查询本月会慢（约 30 秒）
 - 日历接口无官方文档，参数口径可能随 APP 版本变化，升级后需重新验证
+- 批量接口每天最多返回 30 款，月末某天超过 30 款时会有截断

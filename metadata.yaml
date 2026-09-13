@@ -1,6 +1,6 @@
 name: xhhnews
-display_name: 小黑盒热帖推送
-desc: 抓取小黑盒社区热帖与游戏发售日历，推送到群聊。
-version: v1.1.0
+display_name: 小黑盒游戏发售日历
+desc: 查询小黑盒游戏发售日历，查看本周与每月的新游发售列表。
+version: v1.2.0
 author: Roi
 repo: https://github.com/Roi7687/astrbot_plugin_xhhnews
