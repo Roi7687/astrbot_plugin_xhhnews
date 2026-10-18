@@ -1,7 +1,11 @@
 # 开发文档
 
-小黑盒游戏发售日历插件。所有数据都走小黑盒的 HTTP 接口（复刻 APP 请求），
+小黑盒「新游速报」插件。所有数据都走小黑盒的 HTTP 接口（复刻 APP 请求），
 签名复用 Web 端的 hkey 算法，**不需要登录**。
+
+> 当前插件只暴露 `/hbnews`（AI 新游速报）与 `/hbhelp` 两个指令。
+> 月度日历的抓取与排版能力保留在 `calendar_core.py` / `calendar_format.py` 里
+> （没有指令入口），需要恢复时在 `main.py` 加回一个 `@filter.command` handler 即可。
 
 ## 项目结构
 
@@ -9,11 +13,15 @@
 main.py                  # 插件入口：命令注册与消息发送
 metadata.yaml            # 插件元数据
 core/
-    config.py            # 路径常量、接口域名、共用异常
+    config.py            # 路径常量、接口域名、共用异常、AI 精选配置
     calendar_core.py     # 发售日历抓取（数据模型、接口调用、标签补全）
-    calendar_format.py   # 发售日历的 Markdown 排版
+    calendar_format.py   # 发售日历的 Markdown 排版 + 喂给 AI 的清单排版
+    ai_review.py         # AI 精选：提示词模板 + 跨插件调用 + 降级
+    peer_plugin.py       # 通用跨插件调用封装（注册表取实例 / 超时 / 兜异常）
     tag_cache.py         # 游戏标签的本地缓存
     xhh_api.py           # 小黑盒 API 签名工具（hkey/nonce 生成）
+tests/                   # 单元测试（桩对象，不发网络、不起浏览器）
+research/                # 开发期联调脚本（真实链路验证，不属于运行时）
 ```
 
 ## 核心模块
@@ -86,9 +94,47 @@ core/
 
 ### calendar_format.py — 排版
 
-- 本周：每天「游戏名 + 标签」列表
-- 本月：每天「游戏名 + 第一个标签」，配一个月概览（每天几款）
+- 本周：每天「游戏名 + 类型标签」列表（AI 不可用时的降级输出）
+- 本月：每天「游戏名 + 第一个标签」+ 月概览（**函数保留、当前无指令入口**）
 - 历史日期无明细时，退化为「本月早些时候（仅统计）」的数量行
+- `format_week_digest()`：**喂给 AI** 的紧凑清单（「AI 可见」的超集，见下）
+- `format_week_review_markdown()` / `format_week_review_fallback()`：AI 精选正文
+
+> 定稿提示词已经把输出格式写死（只输出入选列表、禁止标题/开场白/总结语/避雷板块），
+> 所以 `format_week_review_markdown()` **原样返回模型正文**，插件不再加自己的排版。
+
+### ai_review.py + peer_plugin.py — AI 精选（跨插件调用）
+
+把「本周新游清单」交给 `astrbot_plugin_aisearch`（Playwright 驱动 DeepSeek 网页版），
+由模型联网检索口碑后挑出值得玩的游戏。链路与取舍：
+
+```
+fetch_week() → format_week_digest() → build_ai_prompt()（模板填清单）
+            → aisearch._send_query(prompt, [])  ← 跨插件调用（peer_plugin）
+            → clean_answer() → format_week_review_markdown() / 降级
+```
+
+关键设计（与 `ASTRBOT_CROSS_PLUGIN_CALL.md` 一致）：
+
+- **提示词与代码解耦**：`AI_REVIEW_PROMPT` 是纯文本常量，占位符
+  `{{在此处填入本周新游清单}}` 由 `build_ai_prompt()` 替换 —— 想改筛选口味/输出格式，
+  只改这一段文本，不用动代码，也不用重载之外的任何操作；
+- **「AI 可见 ≠ 玩家可见」**：清单里额外给了 **Steam AppID / 平台 / 小黑盒关注数**，
+  这些字段不出现在玩家的周历里，但能让模型联网时准确定位游戏（中文译名搜不到时靠 AppID）、
+  判断平台、并优先核验热门作品；
+- **每次现取实例、不缓存**：对方插件热重载会换实例（`star_cls`），缓存旧引用必炸；
+- **尽力而为 + 降级**：未安装 / 未激活 / 未登录 / 超时 / 抛异常 / 空回复，一律只记日志并
+  返回空串，`main.py` 自动降级为「本周完整日历 + 一句说明」，日历主功能永不受影响；
+- **善后**：调用方绕过了对方自己的 `_respond()`，所以成功后来一次
+  `arm_peer_idle_timer()`，替对方重置会话空闲计时器，避免无头浏览器常驻。
+
+可在 `config.py` 调整的项：`AI_REVIEW_ENABLED`（总开关）、`AI_REVIEW_PLUGIN` /
+`AI_REVIEW_METHOD`（对方插件名与方法，改版时改这里）、`AI_REVIEW_TIMEOUT`（默认 180s）、
+`AI_REVIEW_MAX_CHARS` / `AI_REVIEW_MAX_INPUT_CHARS`（输出/输入长度上限）、
+`AI_REVIEW_PROGRESS_HINT`（等待期间是否先发「正在核验」提示）。
+
+> aisearch 单次耗时通常 **20~90s**（浏览器自动化 + 联网搜索），且内部 `asyncio.Lock`
+> 串行化：多人同时用会排队，超时就降级。QQ 被动回复窗口是 5 分钟，所以超时上限不宜超过 240s。
 
 ### tag_cache.py — 标签缓存
 
@@ -100,8 +146,7 @@ core/
 
 | 命令 | 功能 |
 |------|------|
-| `/hbweek` | 本周游戏发售日历 |
-| `/hbmonth [YYYY-MM]` | 本月（或指定月份）游戏发售日历 |
+| `/hbnews` | AI 联网核验本周新游，精选 4~8 款值得玩的（AI 不可用时降级为本周完整日历） |
 | `/hbhelp` | 帮助 |
 
 ## 消息格式
@@ -109,6 +154,9 @@ core/
 - 文本以 QQ Markdown（`msg_type=2`）发送，支持标题、引用、列表等语法
 - QQ 官方平台额外支持键盘按钮（`keyboard` 参数），非 QQ 平台回退纯文本
 - **不发送图片**
+- `/hbnews` 会先 `event.send()` 一条「正在联网核验…」提示（`AI_REVIEW_PROGRESS_HINT`），
+  再发最终结果 —— 因为 `yield` 的结果要等 handler 结束才由 RespondStage 统一发出，
+  起不到「先告诉用户」的作用
 
 ## 数据存储
 
@@ -120,21 +168,39 @@ core/
 # 语法检查
 python -m py_compile main.py core/*.py
 
-# 集成测试：用 AstrBot 运行环境加载插件并跑命令，
-# 结果写入 tools/plugin_test_out.txt
-<astrbot venv>/python.exe tools/test_calendar.py week month month-bad help
+# 单元测试（桩对象，不发网络、不起浏览器；覆盖跨插件调用的 10 个分支）
+python -m unittest discover -s tests -t . -v
 ```
 
-`tools/` 下的脚本是开发期联调工具，不属于插件运行时。
+`research/` 下是真实链路验证脚本（需要 AstrBot 的 venv，脚本里硬编码了本机实例路径）：
+
+```bash
+# 1) 只验证抓数 + 拼 AI 清单/提示词（快，不调用 AI）
+<instance>/venv/Scripts/python.exe research/verify_ai_review.py --fetch-only
+
+# 2) 完整链路：真实小黑盒数据 → 真实 aisearch(DeepSeek) → 最终 QQ Markdown
+#    产物写到 research/verify_output/（prompt.txt / ai_review_raw.txt / final_reply.md）
+<instance>/venv/Scripts/python.exe research/verify_ai_review.py
+
+# 3) 在**运行中的 AstrBot** 里真实发一条指令并收集回复（走 WebChat 平台通道）
+<instance>/venv/Scripts/python.exe research/verify_in_astrbot.py /hbnews
+```
+
 调试接口时注意：**连续快速请求会被限流**（连接被掐断），脚本里都加了间隔。
 
 ## 依赖
 
 - `astrbot` — 插件框架与消息组件
 - `httpx` — 异步 HTTP 客户端
+- `astrbot_plugin_aisearch` — **可选**。不装也能用 `/hbhelp`，
+  只是 `/hbnews` 会降级为「本周完整日历 + 说明」
 
 ## 已知限制
 
-- 已过去日期的标签必须逐个查详情接口，首次查询本月会慢（约 30 秒）
+- 已过去日期的标签必须逐个查详情接口（本周首次查询会慢几秒），命中缓存后很快
 - 日历接口无官方文档，参数口径可能随 APP 版本变化，升级后需重新验证
 - 批量接口每天最多返回 30 款，月末某天超过 30 款时会有截断
+- `/hbnews` 的 AI 环节依赖 aisearch 的登录态（`auth_state.json`）；单次 20~90 秒，
+  多人同时用会排队，超时（默认 180s）就降级为本周完整日历
+- AI 与 aisearch 共用同一个 DeepSeek 会话，提示词开头已要求「忽略此前上下文」，
+  但仍可能被上一轮对话轻微影响；想要完全干净可让用户先 `/ais new` 开新会话

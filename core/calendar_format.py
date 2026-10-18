@@ -1,8 +1,11 @@
 """发售日历的文本格式化（Markdown）。
 
 排版口径：
-    本周 —— 每天列出「游戏名 + 类型标签」，封面图另拼成一张总览图发送；
-    本月 —— 每天只列「游戏名 + 第一个标签」，不发送图片。
+    本周 —— 每天列出「游戏名 + 类型标签」；
+    本月 —— 每天只列「游戏名 + 第一个标签」；
+    AI 精选 —— 喂给模型的紧凑清单（`format_week_digest`，多给 AppID/关注数等
+              玩家可见文本里没有的锚点）+ AI 返回正文的最终排版
+              （`format_week_review_markdown`）。
 """
 
 from __future__ import annotations
@@ -12,6 +15,31 @@ import datetime as dt
 from .calendar_core import BEIJING_TZ, DayRelease, GameItem
 
 _WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+# 接口给的平台标识（多为英文小写）→ 给 AI/用户看的规范名。
+# 日历接口目前几乎都返回 steam，规范成 PC 避免清单里一列全是 "STEAM"。
+_PLATFORM_ALIASES = {
+    "steam": "PC", "pc": "PC", "windows": "PC",
+    "console": "主机", "xbox": "Xbox", "xboxone": "Xbox", "xbox_series": "Xbox",
+    "ps": "PlayStation", "ps4": "PlayStation", "ps5": "PlayStation",
+    "playstation": "PlayStation", "switch": "Switch", "nintendo": "Switch",
+    "mobile": "手机", "ios": "手机", "android": "手机",
+    "mac": "Mac", "macos": "Mac", "linux": "Linux",
+}
+
+
+def _platform_name(raw: str) -> str:
+    key = (raw or "").strip().lower()
+    return _PLATFORM_ALIASES.get(key) or (raw or "").strip().upper()
+
+
+def _platform_text(game: GameItem) -> str:
+    """平台文本：优先接口给的 platforms，其次 game_type 兜底。"""
+    if game.platforms:
+        names = [_platform_name(p) for p in game.platforms if p]
+        if names:
+            return "/".join(dict.fromkeys(names))     # 去重且保序
+    return game.platform_label or "—"
 
 
 def _tag_suffix(game: GameItem) -> str:
@@ -109,3 +137,70 @@ def format_month_markdown(
         lines.append("\n_本月暂无发售数据。_")
 
     return "".join(lines)
+
+
+# ────────────────────────── AI 精选 ──────────────────────────
+
+
+def format_week_digest(days: list[DayRelease], today: dt.date | None = None) -> str:
+    """把本周发售列表拼成喂给 AI 的紧凑清单（「AI 可见」的超集）。
+
+    比玩家看到的周历多给三类信息，都是帮模型联网检索的锚点：
+        - **Steam AppID**：中文译名搜不到时最可靠的定位方式；
+        - **平台**：区分 PC / 主机 / 手机，避免推荐错平台；
+        - **小黑盒关注数**：本周热度先验，用来决定优先核验哪几款。
+    """
+    if not days:
+        return ""
+
+    today = today or dt.datetime.now(BEIJING_TZ).date()
+    first, last = days[0].date, days[-1].date
+    total = sum(len(d.games) for d in days)
+
+    lines = [
+        f"【本周范围】{first:%Y-%m-%d}（周一）→ {last:%Y-%m-%d}（周日），"
+        f"今天是 {today:%Y-%m-%d}（{_WEEKDAY_CN[today.weekday()]}）",
+        f"【统计】本周共 {total} 款新游，按发售日排列",
+        "【清单】（格式：序号. 名称 ｜ 发售日 ｜ 玩法标签 ｜ 平台 ｜ 小黑盒关注数 ｜ Steam AppID）",
+    ]
+
+    index = 0
+    for day in days:
+        for game in day.games:
+            index += 1
+            cols = [
+                game.name,
+                f"{day.date:%m-%d} {_WEEKDAY_CN[day.date.weekday()]}",
+                game.tags_text or "—",
+                _platform_text(game),
+            ]
+            if game.follow_num > 0:
+                cols.append(f"关注 {game.follow_num}")
+            if game.steam_appid:
+                cols.append(f"AppID {game.steam_appid}")
+            lines.append(f"{index}. " + " ｜ ".join(cols))
+
+    return "\n".join(lines)
+
+
+def format_week_review_markdown(review: str) -> str:
+    """AI 精选结果排版：**原样输出**模型正文。
+
+    提示词（用户定稿版）已严格规定输出格式：只输出入选游戏列表，禁止一级标题、
+    开场白、总结语、避雷板块。这里**不再加标题、范围行与脚注**，保证版式完全按
+    提示词走；想改观感只改提示词，不用动代码。
+    """
+    return (review or "").strip()
+
+
+def format_week_review_fallback(
+    days: list[DayRelease],
+    today: dt.date | None = None,
+) -> str:
+    """AI 不可用时的降级输出：完整周历 + 一句原因说明（主功能不受影响）。"""
+    text = format_week_markdown(days, today)
+    return (
+        text
+        + "\n> ⚠️ AI 精选暂不可用（联网核验插件未就绪或超时），"
+        "以上为本周完整日历。\n"
+    )

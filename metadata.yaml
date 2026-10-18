@@ -1,6 +1,6 @@
 name: xhhnews
-display_name: 小黑盒游戏发售日历
-desc: 查询小黑盒游戏发售日历，查看本周与每月的新游发售列表。
-version: v1.2.0
+display_name: 小黑盒新游速报
+desc: /hbnews 由 aisearch 联网核验小黑盒本周新游口碑与评分，精选 4~8 款值得玩的 3A 与高口碑独立游戏；/hbhelp 查看帮助。
+version: v1.4.0
 author: Roi
 repo: https://github.com/Roi7687/astrbot_plugin_xhhnews
